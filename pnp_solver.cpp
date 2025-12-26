@@ -336,53 +336,72 @@ public:
         }
         
         // 步骤4：从M中提取R和T
-        // M = [r1 r2 r3 t]，其中r1, r2, r3是R的列向量
-        Matrix R_approx(3, 3);
-        T = Matrix(3, 1);
-        
+        // M = [R_raw | T_raw]
+        Matrix R_raw(3, 3);
+        Matrix T_raw(3, 1);
+
         for (int i = 0; i < 3; i++) {
-            for (int j = 0; j < 3; j++) {
-                R_approx.data[i][j] = M.data[i][j];
-            }
-            T.data[i][0] = M.data[i][3];
+                for (int j = 0; j < 3; j++) {
+                        R_raw.data[i][j] = M.data[i][j];
+                }
+                T_raw.data[i][0] = M.data[i][3];
         }
-        
-        // 步骤5：强制R为正交矩阵（使用SVD分解）
-        R = enforceOrthogonality(R_approx);
-        
-        // 归一化T（保持尺度一致性）
-        double scale = 0;
-        for (int i = 0; i < 3; i++) {
-            for (int j = 0; j < 3; j++) {
-                scale += R_approx.data[i][j] * R_approx.data[i][j];
-            }
+
+        // 步骤5：正交化与尺度恢复
+        // 对 R_raw 进行 SVD 分解: R_raw = U * S * V^T
+        SVD svd_r(R_raw);
+        Matrix U = svd_r.U;
+        Matrix V = svd_r.V;
+        Matrix R_ortho = U * V.transpose(); // 得到最接近的旋转矩阵
+
+        // 恢复尺度，通过比较 R_raw 和 R_ortho 的范数来计算尺度
+        double norm_raw = 0, norm_ortho = 0;
+        for(int i=0; i<3; ++i) 
+                for(int j=0; j<3; ++j) {
+                        norm_raw += R_raw.data[i][j] * R_raw.data[i][j];
+                        norm_ortho += R_ortho.data[i][j] * R_ortho.data[i][j]; // 其实这里是3
+                }
+        double scale = sqrt(norm_raw / norm_ortho);
+        Matrix T_ortho(3, 1);
+        // T 也需要除以尺度
+        for(int i=0; i<3; ++i) T_ortho.data[i][0] = T_raw.data[i][0] / scale;
+
+        // 符号修正
+        if (determinant3x3(R_ortho) < 0) {
+                // 整个 R 取反变成 +1
+                for(int i=0; i<3; ++i)
+                        for(int j=0; j<3; ++j)
+                                R_ortho.data[i][j] = -R_ortho.data[i][j];
+                
+                // T 也要跟随取反！(保持 R 和 T 的相对关系)
+                for(int i=0; i<3; ++i)
+                        T_ortho.data[i][0] = -T_ortho.data[i][0];
         }
-        scale = sqrt(scale / 9.0);
-        
-        for (int i = 0; i < 3; i++) {
-            T.data[i][0] /= scale;
+
+        // 手性约束
+        // 变换第一个点，看 Z 是否大于 0
+        double x = world_points[0][0];
+        double y = world_points[0][1];
+        double z = world_points[0][2];
+        // P_cam = R * P_world + T
+        double z_cam = R_ortho.data[2][0] * x + R_ortho.data[2][1] * y + R_ortho.data[2][2] * z + T_ortho.data[2][0];
+
+        if (z_cam < 0) {
+                // 如果点在相机背面，说明 R 和 T 都反了
+                for(int i=0; i<3; ++i) {
+                        for(int j=0; j<3; ++j) R_ortho.data[i][j] = -R_ortho.data[i][j];
+                        T_ortho.data[i][0] = -T_ortho.data[i][0];
+                }
         }
-        
+
+        // 赋值回输出变量
+        R = R_ortho;
+        T = T_ortho;
+
         return true;
     }
     
 private:
-    // 强制矩阵为正交矩阵（使用SVD分解：R = U * V^T）
-    static Matrix enforceOrthogonality(const Matrix& R_approx) {
-        SVD svd(R_approx);
-        Matrix R = svd.U * svd.V.transpose();
-        
-        // 确保行列式为+1（右手坐标系）
-        double det = determinant3x3(R);
-        if (det < 0) {
-            for (int i = 0; i < 3; i++) {
-                R.data[i][2] = -R.data[i][2];
-            }
-        }
-        
-        return R;
-    }
-    
     // 计算3x3矩阵的行列式
     static double determinant3x3(const Matrix& M) {
         return M.data[0][0] * (M.data[1][1] * M.data[2][2] - M.data[1][2] * M.data[2][1])
