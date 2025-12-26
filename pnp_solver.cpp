@@ -180,7 +180,7 @@ private:
         }
         
         // Jacobi迭代
-        const int maxIter = 100;
+        const int maxIter = 3000;
         const double tolerance = 1e-10;
         
         for (int iter = 0; iter < maxIter; iter++) {
@@ -266,141 +266,133 @@ public:
             cerr << "至少需要6个点才能求解PnP问题！" << endl;
             return false;
         }
+
+        // 世界坐标中心化
+        double cx = 0, cy = 0, cz = 0;
+        for (const auto& pt : world_points) {
+            cx += pt[0]; cy += pt[1]; cz += pt[2];
+        }
+        cx /= n; cy /= n; cz /= n;
+
+        vector<vector<double>> centered_world_points = world_points;
+        double sum_dist = 0;
+        for (auto& pt : centered_world_points) {
+            pt[0] -= cx; pt[1] -= cy; pt[2] -= cz;
+            sum_dist += sqrt(pt[0]*pt[0] + pt[1]*pt[1] + pt[2]*pt[2]);
+        }
+
+        // 世界坐标缩放，让点的平均距离等于 sqrt(3)
+        double avg_dist = sum_dist / n;
+        double scale_world = sqrt(3.0) / avg_dist; 
         
-        // 步骤1：将图像点归一化（去除内参影响）
+        for (auto& pt : centered_world_points) {
+            pt[0] *= scale_world;
+            pt[1] *= scale_world;
+            pt[2] *= scale_world;
+        }
+
+        // 图像点归一化
         Matrix K_inv = K.inverse();
         vector<vector<double>> normalized_points(n, vector<double>(3));
-        
         for (int i = 0; i < n; i++) {
-            Matrix img_pt(3, 1);
-            img_pt.data[0][0] = image_points[i][0];
-            img_pt.data[1][0] = image_points[i][1];
-            img_pt.data[2][0] = 1.0;
-            
+            Matrix img_pt(3, 1, {image_points[i][0], image_points[i][1], 1.0});
             Matrix norm_pt = K_inv * img_pt;
             normalized_points[i][0] = norm_pt.data[0][0];
             normalized_points[i][1] = norm_pt.data[1][0];
-            normalized_points[i][2] = norm_pt.data[2][0];
         }
         
-        // 步骤2：构建DLT线性方程组 A * m = 0
-        // 其中 m 是 [R|T] 矩阵展开的12维向量
+        // 构建 DLT 矩阵 A
         Matrix A(2 * n, 12);
-        
         for (int i = 0; i < n; i++) {
-            double x = normalized_points[i][0];
-            double y = normalized_points[i][1];
-            double X = world_points[i][0];
-            double Y = world_points[i][1];
-            double Z = world_points[i][2];
+            double u = normalized_points[i][0];
+            double v = normalized_points[i][1];
+            double X = centered_world_points[i][0]; 
+            double Y = centered_world_points[i][1];
+            double Z = centered_world_points[i][2];
             
-            // 第一个方程（x方向）
-            A.data[2*i][0] = X;
-            A.data[2*i][1] = Y;
-            A.data[2*i][2] = Z;
-            A.data[2*i][3] = 1;
-            A.data[2*i][4] = 0;
-            A.data[2*i][5] = 0;
-            A.data[2*i][6] = 0;
-            A.data[2*i][7] = 0;
-            A.data[2*i][8] = -x * X;
-            A.data[2*i][9] = -x * Y;
-            A.data[2*i][10] = -x * Z;
-            A.data[2*i][11] = -x;
+            A.data[2*i][0] = X; A.data[2*i][1] = Y; A.data[2*i][2] = Z; A.data[2*i][3] = 1;
+            A.data[2*i][4] = 0; A.data[2*i][5] = 0; A.data[2*i][6] = 0; A.data[2*i][7] = 0;
+            A.data[2*i][8] = -u * X; A.data[2*i][9] = -u * Y; A.data[2*i][10] = -u * Z; A.data[2*i][11] = -u;
             
-            // 第二个方程（y方向）
-            A.data[2*i+1][0] = 0;
-            A.data[2*i+1][1] = 0;
-            A.data[2*i+1][2] = 0;
-            A.data[2*i+1][3] = 0;
-            A.data[2*i+1][4] = X;
-            A.data[2*i+1][5] = Y;
-            A.data[2*i+1][6] = Z;
-            A.data[2*i+1][7] = 1;
-            A.data[2*i+1][8] = -y * X;
-            A.data[2*i+1][9] = -y * Y;
-            A.data[2*i+1][10] = -y * Z;
-            A.data[2*i+1][11] = -y;
+            A.data[2*i+1][0] = 0; A.data[2*i+1][1] = 0; A.data[2*i+1][2] = 0; A.data[2*i+1][3] = 0;
+            A.data[2*i+1][4] = X; A.data[2*i+1][5] = Y; A.data[2*i+1][6] = Z; A.data[2*i+1][7] = 1;
+            A.data[2*i+1][8] = -v * X; A.data[2*i+1][9] = -v * Y; A.data[2*i+1][10] = -v * Z; A.data[2*i+1][11] = -v;
         }
         
-        // 步骤3：使用SVD求解 A * m = 0（m是A的右奇异向量，对应最小奇异值）
+        // SVD 求解
         Matrix AtA = A.transpose() * A;
         SVD svd(AtA);
         
-        // 最小特征值对应的特征向量（V的最后一列）
-        Matrix M(3, 4);
+        // 提取投影矩阵 M_norm
+        Matrix M_norm(3, 4);
         for (int i = 0; i < 3; i++) {
-            for (int j = 0; j < 4; j++) {
-                M.data[i][j] = svd.V.data[i * 4 + j][11];  // 最后一列
-            }
+            for (int j = 0; j < 4; j++) M_norm.data[i][j] = svd.V.data[i * 4 + j][11];
         }
+
+        // 还原
+        Matrix Q(3, 3); // M_norm 的前3列
+        Matrix q(3, 1); // M_norm 的第4列
+        for(int i=0; i<3; ++i) {
+            for(int j=0; j<3; ++j) Q.data[i][j] = M_norm.data[i][j];
+            q.data[i][0] = M_norm.data[i][3];
+        }
+
+        // 还原旋转部分
+        Matrix R_raw(3, 3); 
+        for(int i=0; i<3; ++i)
+            for(int j=0; j<3; ++j) 
+                R_raw.data[i][j] = scale_world * Q.data[i][j];
+
+        // 还原平移部分
+        Matrix C_mat(3, 1);
+        C_mat.data[0][0] = cx; C_mat.data[1][0] = cy; C_mat.data[2][0] = cz;
         
-        // 步骤4：从M中提取R和T
-        // M = [R_raw | T_raw]
-        Matrix R_raw(3, 3);
+        Matrix RC = R_raw * C_mat;
         Matrix T_raw(3, 1);
+        for(int i=0; i<3; ++i)
+            T_raw.data[i][0] = q.data[i][0] - RC.data[i][0];
 
-        for (int i = 0; i < 3; i++) {
-                for (int j = 0; j < 3; j++) {
-                        R_raw.data[i][j] = M.data[i][j];
-                }
-                T_raw.data[i][0] = M.data[i][3];
-        }
-
-        // 步骤5：正交化与尺度恢复
-        // 对 R_raw 进行 SVD 分解: R_raw = U * S * V^T
+        // 正交化与全局尺度恢复
         SVD svd_r(R_raw);
-        Matrix U = svd_r.U;
-        Matrix V = svd_r.V;
-        Matrix R_ortho = U * V.transpose(); // 得到最接近的旋转矩阵
+        Matrix R_ortho = svd_r.U * svd_r.V.transpose();
 
-        // 恢复尺度，通过比较 R_raw 和 R_ortho 的范数来计算尺度
-        double norm_raw = 0, norm_ortho = 0;
+        double norm_raw = 0;
         for(int i=0; i<3; ++i) 
-                for(int j=0; j<3; ++j) {
-                        norm_raw += R_raw.data[i][j] * R_raw.data[i][j];
-                        norm_ortho += R_ortho.data[i][j] * R_ortho.data[i][j]; // 其实这里是3
-                }
-        double scale = sqrt(norm_raw / norm_ortho);
-        Matrix T_ortho(3, 1);
-        // T 也需要除以尺度
-        for(int i=0; i<3; ++i) T_ortho.data[i][0] = T_raw.data[i][0] / scale;
+            for(int j=0; j<3; ++j) 
+                norm_raw += R_raw.data[i][j] * R_raw.data[i][j];
+        
+        double scale_global = sqrt(norm_raw / 3.0); 
+        
+        Matrix T_final(3, 1);
+        for(int i=0; i<3; ++i) T_final.data[i][0] = T_raw.data[i][0] / scale_global;
 
         // 符号修正
         if (determinant3x3(R_ortho) < 0) {
-                // 整个 R 取反变成 +1
-                for(int i=0; i<3; ++i)
-                        for(int j=0; j<3; ++j)
-                                R_ortho.data[i][j] = -R_ortho.data[i][j];
-                
-                // T 也要跟随取反！(保持 R 和 T 的相对关系)
-                for(int i=0; i<3; ++i)
-                        T_ortho.data[i][0] = -T_ortho.data[i][0];
+            for(int i=0; i<3; ++i)
+                for(int j=0; j<3; ++j) R_ortho.data[i][j] = -R_ortho.data[i][j];
+            for(int i=0; i<3; ++i) T_final.data[i][0] = -T_final.data[i][0];
         }
 
         // 手性约束
-        // 变换第一个点，看 Z 是否大于 0
-        double x = world_points[0][0];
-        double y = world_points[0][1];
-        double z = world_points[0][2];
-        // P_cam = R * P_world + T
-        double z_cam = R_ortho.data[2][0] * x + R_ortho.data[2][1] * y + R_ortho.data[2][2] * z + T_ortho.data[2][0];
+        // 使用原始世界坐标验证
+        double x_raw = world_points[0][0];
+        double y_raw = world_points[0][1];
+        double z_raw = world_points[0][2];
+        double z_cam = R_ortho.data[2][0] * x_raw + R_ortho.data[2][1] * y_raw + R_ortho.data[2][2] * z_raw + T_final.data[2][0];
 
         if (z_cam < 0) {
-                // 如果点在相机背面，说明 R 和 T 都反了
-                for(int i=0; i<3; ++i) {
-                        for(int j=0; j<3; ++j) R_ortho.data[i][j] = -R_ortho.data[i][j];
-                        T_ortho.data[i][0] = -T_ortho.data[i][0];
-                }
+            for(int i=0; i<3; ++i) {
+                for(int j=0; j<3; ++j) R_ortho.data[i][j] = -R_ortho.data[i][j];
+                T_final.data[i][0] = -T_final.data[i][0];
+            }
         }
 
-        // 赋值回输出变量
         R = R_ortho;
-        T = T_ortho;
+        T = T_final;
 
         return true;
     }
-    
+
 private:
     // 计算3x3矩阵的行列式
     static double determinant3x3(const Matrix& M) {
